@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Lint
+        run: |
+          uvx ruff check .
+          uvx ruff format --check .
+      - name: Test
+        run: uv run --python 3.12 --group dev pytest -q
+
+  policy-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Policy gate (model-based must cost less than fixed intervals on the held-out year)
+        run: |
+          mkdir -p data/ci
+          uv run --python 3.12 fleetmaint evaluate --gate \
+            --markdown "$GITHUB_STEP_SUMMARY" --json data/ci/results.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: policy-results
+          path: data/ci/results.json
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t fleet-maint:ci .
+      - name: Smoke test the API
+        run: |
+          docker run -d --name fleet -p 8884:8884 fleet-maint:ci
+          for i in $(seq 1 90); do curl -sf http://localhost:8884/healthz && break; sleep 2; done
+          curl -sf "http://localhost:8884/api/fleet?limit=5"
+          curl -sf "http://localhost:8884/api/plan?days=7" > /dev/null
+          curl -sf http://localhost:8884/api/policies > /dev/null
+          curl -sf http://localhost:8884/metrics | grep fleetmaint_policy_cost_usd
+          docker logs fleet | tail -5
+          docker rm -f fleet
